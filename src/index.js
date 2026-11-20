@@ -12,9 +12,16 @@ export default {
     }
 
     if (url.pathname === "/admin/enroll" && request.method === "POST") {
-      if (request.headers.get("Authorization") !== `Bearer ${env.ADMIN_SECRET}`) {
-        return new Response("Unauthorized", { status: 401 });
-      }
+     const received = request.headers.get("Authorization") || "";
+ const expected = `Bearer ${env.ADMIN_SECRET}`;
+
+if (received !== expected) {
+  return Response.json({
+    error: "Unauthorized",
+    secretLoaded: Boolean(env.ADMIN_SECRET),
+    receivedBearer: received.startsWith("Bearer ")
+  }, { status: 401 });
+}
 
       const body = await request.json();
       const { student_id, token } = body;
