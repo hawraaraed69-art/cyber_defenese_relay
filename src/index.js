@@ -1,4 +1,17 @@
 import { DurableObject } from "cloudflare:workers";
+// الإعدادات العامة لمختبر Cyber Defense SOC Lab
+const LAB_CONFIG = {
+  version: "1.0",
+  nmap_options: [
+    "-sS", "-sT", "-sV", "-sC",
+    "-O", "-A", "-Pn", "-sn",
+    "-sU", "-F", "-T2", "-T3", "-T4"
+  ],
+  max_capture_packets: 100,
+  default_capture_packets: 20,
+  command_timeout: 120000,
+  enabled_actions: ["scan", "interfaces", "capture", "banner"]
+};
 
 export default {
   async fetch(request, env) {
@@ -9,6 +22,10 @@ export default {
         status: "online",
         service: "Cyber Defense Relay"
       });
+      // إرسال الإعدادات العامة للمختبر
+if (url.pathname === "/config" && request.method === "GET") {
+  return Response.json(LAB_CONFIG);
+}
     }
 
     if (url.pathname === "/admin/enroll" && request.method === "POST") {
