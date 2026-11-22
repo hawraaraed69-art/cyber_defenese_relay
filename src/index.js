@@ -1,22 +1,17 @@
 import { DurableObject } from "cloudflare:workers";
 
-// الإعدادات العامة لمختبر Cyber Defense SOC Lab
+// الإعدادات العامة للمختبر
 const LAB_CONFIG = {
   version: "1.0",
-
   nmap_options: [
     "-sS", "-sT", "-sV", "-sC",
     "-O", "-A", "-Pn", "-sn",
     "-sU", "-F", "-T2", "-T3", "-T4"
   ],
-
   max_capture_packets: 100,
   default_capture_packets: 20,
   command_timeout: 120000,
-
-  enabled_actions: [
-    "scan", "interfaces", "capture", "banner"
-  ]
+  enabled_actions: ["scan", "interfaces", "capture", "banner"]
 };
 
 export default {
@@ -31,7 +26,7 @@ export default {
       });
     }
 
-    // إرسال الإعدادات العامة للمختبر
+    // الإعدادات العامة
     if (url.pathname === "/config" && request.method === "GET") {
       return Response.json(LAB_CONFIG);
     }
@@ -39,9 +34,11 @@ export default {
     // تسجيل طالب جديد
     if (url.pathname === "/admin/enroll" && request.method === "POST") {
       const received = request.headers.get("Authorization") || "";
-      const expected = `Bearer ${env.ADMIN_SECRET}`;
 
-      if (!env.ADMIN_SECRET || received !== expected) {
+      if (
+        !env.ADMIN_SECRET ||
+        received !== `Bearer ${env.ADMIN_SECRET}`
+      ) {
         return new Response("Unauthorized", { status: 401 });
       }
 
@@ -81,8 +78,10 @@ export default {
       );
     }
 
-    // إرسال أمر من المختبر إلى جهاز الطالب
+    // إرسال أمر إلى جهاز الطالب
     if (url.pathname === "/command" && request.method === "POST") {
+
+      // التحقق من سر التطبيق
       if (
         !env.APP_SECRET ||
         request.headers.get("Authorization") !== `Bearer ${env.APP_SECRET}`
@@ -92,12 +91,21 @@ export default {
 
       const body = await request.json();
 
+      // التحقق من هوية الطالب
       if (!validId(body.student_id)) {
         return new Response("Invalid student ID", { status: 400 });
       }
 
+      // التحقق من وجود رمز الطالب
+      if (!validToken(body.student_token)) {
+        return new Response("Student authentication required", {
+          status: 401
+        });
+      }
+
       const id = env.SESSIONS.idFromName(body.student_id);
 
+      // إرسال الطلب إلى جلسة الطالب للتحقق من الرمز
       return env.SESSIONS.get(id).fetch("https://internal/command", {
         method: "POST",
         body: JSON.stringify(body)
@@ -168,6 +176,10 @@ export class StudentSession extends DurableObject {
     if (url.pathname === "/enroll" && request.method === "POST") {
       const { token } = await request.json();
 
+      if (!validToken(token)) {
+        return new Response("Invalid token", { status: 400 });
+      }
+
       await this.ctx.storage.put(
         "tokenHash",
         await hashToken(token)
@@ -176,7 +188,7 @@ export class StudentSession extends DurableObject {
       return Response.json({ enrolled: true });
     }
 
-    // استقبال اتصال Agent
+    // استقبال اتصال Agent والتحقق من الرمز
     if (url.pathname === "/agent") {
       const authorization = request.headers.get("Authorization") || "";
 
@@ -188,6 +200,7 @@ export class StudentSession extends DurableObject {
 
       if (
         !savedHash ||
+        !validToken(token) ||
         !safeEqual(await hashToken(token), savedHash)
       ) {
         return new Response("Unauthorized", { status: 401 });
@@ -225,8 +238,25 @@ export class StudentSession extends DurableObject {
       });
     }
 
-    // تنفيذ أوامر المختبر
+    // تنفيذ أوامر المختبر بعد التحقق من الطالب
     if (url.pathname === "/command" && request.method === "POST") {
+      const body = await request.json();
+
+      // التحقق من الرمز المخزن لهذا الطالب
+      const savedHash = await this.ctx.storage.get("tokenHash");
+
+      if (
+        !savedHash ||
+        !validToken(body.student_token) ||
+        !safeEqual(
+          await hashToken(body.student_token),
+          savedHash
+        )
+      ) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      // التأكد من اتصال برنامج الطالب
       if (!this.socket || this.socket.readyState !== 1) {
         return Response.json(
           { error: "Student agent is offline" },
@@ -234,8 +264,7 @@ export class StudentSession extends DurableObject {
         );
       }
 
-      const body = await request.json();
-
+      // التحقق من نوع الأمر
       if (!LAB_CONFIG.enabled_actions.includes(body.action)) {
         return Response.json(
           { error: "Invalid action" },
@@ -260,6 +289,7 @@ export class StudentSession extends DurableObject {
         });
       });
 
+      // إرسال الأمر إلى جهاز الطالب
       this.socket.send(JSON.stringify({
         type: "command",
         id: requestId,
