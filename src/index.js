@@ -23,8 +23,17 @@ export default {
         service: "Cyber Defense Relay"
       });
       // إرسال الإعدادات العامة للمختبر
-if (url.pathname === "/config" && request.method === "GET") {
-  return Response.json(LAB_CONFIG);
+   if (url.pathname === "/health") {
+     return Response.json({
+       status: "online",
+       service: "Cyber Defense Relay"
+  });
+}
+
+// إرسال الإعدادات العامة للمختبر
+  if (url.pathname === "/config" && request.method === "GET") {
+    return Response.json(LAB_CONFIG);
+}
 }
     }
 
