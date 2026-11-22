@@ -1,59 +1,57 @@
 import { DurableObject } from "cloudflare:workers";
+
 // الإعدادات العامة لمختبر Cyber Defense SOC Lab
 const LAB_CONFIG = {
   version: "1.0",
+
   nmap_options: [
     "-sS", "-sT", "-sV", "-sC",
     "-O", "-A", "-Pn", "-sn",
     "-sU", "-F", "-T2", "-T3", "-T4"
   ],
+
   max_capture_packets: 100,
   default_capture_packets: 20,
   command_timeout: 120000,
-  enabled_actions: ["scan", "interfaces", "capture", "banner"]
+
+  enabled_actions: [
+    "scan", "interfaces", "capture", "banner"
+  ]
 };
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // فحص حالة الاتصال
     if (url.pathname === "/health") {
       return Response.json({
         status: "online",
         service: "Cyber Defense Relay"
       });
-      // إرسال الإعدادات العامة للمختبر
-   if (url.pathname === "/health") {
-     return Response.json({
-       status: "online",
-       service: "Cyber Defense Relay"
-  });
-}
-
-// إرسال الإعدادات العامة للمختبر
-  if (url.pathname === "/config" && request.method === "GET") {
-    return Response.json(LAB_CONFIG);
-}
-}
     }
 
-    if (url.pathname === "/admin/enroll" && request.method === "POST") {
-     const received = request.headers.get("Authorization") || "";
- const expected = `Bearer ${env.ADMIN_SECRET}`;
+    // إرسال الإعدادات العامة للمختبر
+    if (url.pathname === "/config" && request.method === "GET") {
+      return Response.json(LAB_CONFIG);
+    }
 
-if (received !== expected) {
-  return Response.json({
-    error: "Unauthorized",
-    secretLoaded: Boolean(env.ADMIN_SECRET),
-    receivedBearer: received.startsWith("Bearer ")
-  }, { status: 401 });
-}
+    // تسجيل طالب جديد
+    if (url.pathname === "/admin/enroll" && request.method === "POST") {
+      const received = request.headers.get("Authorization") || "";
+      const expected = `Bearer ${env.ADMIN_SECRET}`;
+
+      if (!env.ADMIN_SECRET || received !== expected) {
+        return new Response("Unauthorized", { status: 401 });
+      }
 
       const body = await request.json();
       const { student_id, token } = body;
 
       if (!validId(student_id) || !validToken(token)) {
-        return new Response("Invalid student credentials", { status: 400 });
+        return new Response("Invalid student credentials", {
+          status: 400
+        });
       }
 
       const id = env.SESSIONS.idFromName(student_id);
@@ -65,7 +63,11 @@ if (received !== expected) {
       });
     }
 
-    if (url.pathname === "/agent" && request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+    // اتصال برنامج الطالب
+    if (
+      url.pathname === "/agent" &&
+      request.headers.get("Upgrade")?.toLowerCase() === "websocket"
+    ) {
       const student = url.searchParams.get("student_id");
 
       if (!validId(student)) {
@@ -73,13 +75,18 @@ if (received !== expected) {
       }
 
       const id = env.SESSIONS.idFromName(student);
+
       return env.SESSIONS.get(id).fetch(
         new Request("https://internal/agent", request)
       );
     }
 
+    // إرسال أمر من المختبر إلى جهاز الطالب
     if (url.pathname === "/command" && request.method === "POST") {
-      if (request.headers.get("Authorization") !== `Bearer ${env.APP_SECRET}`) {
+      if (
+        !env.APP_SECRET ||
+        request.headers.get("Authorization") !== `Bearer ${env.APP_SECRET}`
+      ) {
         return new Response("Unauthorized", { status: 401 });
       }
 
@@ -90,6 +97,7 @@ if (received !== expected) {
       }
 
       const id = env.SESSIONS.idFromName(body.student_id);
+
       return env.SESSIONS.get(id).fetch("https://internal/command", {
         method: "POST",
         body: JSON.stringify(body)
@@ -100,38 +108,53 @@ if (received !== expected) {
   }
 };
 
+// التحقق من صيغة هوية الطالب
 function validId(value) {
   return typeof value === "string" &&
     /^[a-zA-Z0-9_-]{1,32}$/.test(value);
 }
 
+// التحقق من طول رمز الطالب
 function validToken(value) {
   return typeof value === "string" &&
-    value.length >= 32 && value.length <= 128;
+    value.length >= 32 &&
+    value.length <= 128;
 }
 
+// تشفير رمز الطالب
 async function hashToken(token) {
   const data = new TextEncoder().encode(token);
   const hash = await crypto.subtle.digest("SHA-256", data);
+
   return Array.from(new Uint8Array(hash))
     .map(b => b.toString(16).padStart(2, "0"))
     .join("");
 }
 
+// مقارنة آمنة للقيم
 function safeEqual(a, b) {
-  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) {
+  if (
+    typeof a !== "string" ||
+    typeof b !== "string" ||
+    a.length !== b.length
+  ) {
     return false;
   }
+
   let result = 0;
+
   for (let i = 0; i < a.length; i++) {
     result |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
+
   return result === 0;
 }
 
+// جلسة مستقلة لكل طالب
 export class StudentSession extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
+
     this.ctx = ctx;
     this.env = env;
     this.socket = null;
@@ -141,21 +164,32 @@ export class StudentSession extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
 
+    // تسجيل رمز الطالب المشفر
     if (url.pathname === "/enroll" && request.method === "POST") {
       const { token } = await request.json();
-      await this.ctx.storage.put("tokenHash", await hashToken(token));
+
+      await this.ctx.storage.put(
+        "tokenHash",
+        await hashToken(token)
+      );
+
       return Response.json({ enrolled: true });
     }
 
+    // استقبال اتصال Agent
     if (url.pathname === "/agent") {
       const authorization = request.headers.get("Authorization") || "";
+
       const token = authorization.startsWith("Bearer ")
         ? authorization.slice(7)
         : "";
 
       const savedHash = await this.ctx.storage.get("tokenHash");
 
-      if (!savedHash || !safeEqual(await hashToken(token), savedHash)) {
+      if (
+        !savedHash ||
+        !safeEqual(await hashToken(token), savedHash)
+      ) {
         return new Response("Unauthorized", { status: 401 });
       }
 
@@ -174,11 +208,15 @@ export class StudentSession extends DurableObject {
       });
 
       server.addEventListener("close", () => {
-        if (this.socket === server) this.socket = null;
+        if (this.socket === server) {
+          this.socket = null;
+        }
       });
 
       server.addEventListener("error", () => {
-        if (this.socket === server) this.socket = null;
+        if (this.socket === server) {
+          this.socket = null;
+        }
       });
 
       return new Response(null, {
@@ -187,6 +225,7 @@ export class StudentSession extends DurableObject {
       });
     }
 
+    // تنفيذ أوامر المختبر
     if (url.pathname === "/command" && request.method === "POST") {
       if (!this.socket || this.socket.readyState !== 1) {
         return Response.json(
@@ -196,10 +235,12 @@ export class StudentSession extends DurableObject {
       }
 
       const body = await request.json();
-      const allowed = ["scan", "interfaces", "capture", "banner"];
 
-      if (!allowed.includes(body.action)) {
-        return Response.json({ error: "Invalid action" }, { status: 400 });
+      if (!LAB_CONFIG.enabled_actions.includes(body.action)) {
+        return Response.json(
+          { error: "Invalid action" },
+          { status: 400 }
+        );
       }
 
       const requestId = crypto.randomUUID();
@@ -207,10 +248,11 @@ export class StudentSession extends DurableObject {
       const result = new Promise(resolve => {
         const timer = setTimeout(() => {
           this.pending.delete(requestId);
+
           resolve({
             error: "Agent response timed out"
           });
-        }, 120000);
+        }, LAB_CONFIG.command_timeout);
 
         this.pending.set(requestId, data => {
           clearTimeout(timer);
@@ -231,11 +273,14 @@ export class StudentSession extends DurableObject {
     return new Response("Not Found", { status: 404 });
   }
 
+  // استقبال نتائج الأوامر من جهاز الطالب
   handleMessage(message) {
     try {
       const data = JSON.parse(message);
 
-      if (data.type !== "result" || !data.id) return;
+      if (data.type !== "result" || !data.id) {
+        return;
+      }
 
       const resolve = this.pending.get(data.id);
 
@@ -244,7 +289,7 @@ export class StudentSession extends DurableObject {
         resolve(data);
       }
     } catch {
-      // Ignore invalid messages
+      // تجاهل الرسائل غير الصالحة
     }
   }
 }
