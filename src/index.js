@@ -1,8 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
-// الإعدادات العامة للمختبر
 const LAB_CONFIG = {
-  version: "1.0",
+  version: "2.0",
   nmap_options: [
     "-sS", "-sT", "-sV", "-sC",
     "-O", "-A", "-Pn", "-sn",
@@ -18,7 +17,6 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // فحص حالة الاتصال
     if (url.pathname === "/health") {
       return Response.json({
         status: "online",
@@ -26,45 +24,67 @@ export default {
       });
     }
 
-    // الإعدادات العامة
     if (url.pathname === "/config" && request.method === "GET") {
       return Response.json(LAB_CONFIG);
     }
 
-    // تسجيل طالب جديد
+    // تسجيل الجهاز تلقائياً لأول مرة
+    if (url.pathname === "/register" && request.method === "POST") {
+      const body = await request.json();
+
+      if (!validId(body.student_id) ||
+          !validToken(body.agent_token) ||
+          !validToken(body.pair_code)) {
+        return new Response("Invalid registration", { status: 400 });
+      }
+
+      const id = env.SESSIONS.idFromName(body.student_id);
+      return env.SESSIONS.get(id).fetch("https://internal/register", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+    }
+
+    // ربط المتصفح بجهاز الطالب
+    if (url.pathname === "/pair" && request.method === "POST") {
+      const body = await request.json();
+
+      if (!validId(body.student_id) || !validToken(body.pair_code)) {
+        return new Response("Invalid pairing", { status: 400 });
+      }
+
+      const id = env.SESSIONS.idFromName(body.student_id);
+      return env.SESSIONS.get(id).fetch("https://internal/pair", {
+        method: "POST",
+        body: JSON.stringify(body)
+      });
+    }
+
+    // تسجيل قديم للمشرف
     if (url.pathname === "/admin/enroll" && request.method === "POST") {
       const received = request.headers.get("Authorization") || "";
 
-      if (
-        !env.ADMIN_SECRET ||
-        received !== `Bearer ${env.ADMIN_SECRET}`
-      ) {
+      if (!env.ADMIN_SECRET ||
+          received !== `Bearer ${env.ADMIN_SECRET}`) {
         return new Response("Unauthorized", { status: 401 });
       }
 
       const body = await request.json();
-      const { student_id, token } = body;
 
-      if (!validId(student_id) || !validToken(token)) {
-        return new Response("Invalid student credentials", {
-          status: 400
-        });
+      if (!validId(body.student_id) || !validToken(body.token)) {
+        return new Response("Invalid credentials", { status: 400 });
       }
 
-      const id = env.SESSIONS.idFromName(student_id);
-      const stub = env.SESSIONS.get(id);
-
-      return stub.fetch("https://internal/enroll", {
+      const id = env.SESSIONS.idFromName(body.student_id);
+      return env.SESSIONS.get(id).fetch("https://internal/enroll", {
         method: "POST",
-        body: JSON.stringify({ token })
+        body: JSON.stringify({ token: body.token })
       });
     }
 
-    // اتصال برنامج الطالب
-    if (
-      url.pathname === "/agent" &&
-      request.headers.get("Upgrade")?.toLowerCase() === "websocket"
-    ) {
+    // اتصال Agent
+    if (url.pathname === "/agent" &&
+        request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
       const student = url.searchParams.get("student_id");
 
       if (!validId(student)) {
@@ -72,40 +92,25 @@ export default {
       }
 
       const id = env.SESSIONS.idFromName(student);
-
       return env.SESSIONS.get(id).fetch(
         new Request("https://internal/agent", request)
       );
     }
 
-    // إرسال أمر إلى جهاز الطالب
+    // إرسال أمر من واجهة المختبر
     if (url.pathname === "/command" && request.method === "POST") {
-
-      // التحقق من سر التطبيق
-      if (
-        !env.APP_SECRET ||
-        request.headers.get("Authorization") !== `Bearer ${env.APP_SECRET}`
-      ) {
+      if (!env.APP_SECRET ||
+          request.headers.get("Authorization") !== `Bearer ${env.APP_SECRET}`) {
         return new Response("Unauthorized", { status: 401 });
       }
 
       const body = await request.json();
 
-      // التحقق من هوية الطالب
-      if (!validId(body.student_id)) {
-        return new Response("Invalid student ID", { status: 400 });
-      }
-
-      // التحقق من وجود رمز الطالب
-      if (!validToken(body.student_token)) {
-        return new Response("Student authentication required", {
-          status: 401
-        });
+      if (!validId(body.student_id) || !validToken(body.session_token)) {
+        return new Response("Invalid session", { status: 401 });
       }
 
       const id = env.SESSIONS.idFromName(body.student_id);
-
-      // إرسال الطلب إلى جلسة الطالب للتحقق من الرمز
       return env.SESSIONS.get(id).fetch("https://internal/command", {
         method: "POST",
         body: JSON.stringify(body)
@@ -116,20 +121,16 @@ export default {
   }
 };
 
-// التحقق من صيغة هوية الطالب
 function validId(value) {
   return typeof value === "string" &&
-    /^[a-zA-Z0-9_-]{1,32}$/.test(value);
+    /^[a-f0-9]{64}$/.test(value);
 }
 
-// التحقق من طول رمز الطالب
 function validToken(value) {
   return typeof value === "string" &&
-    value.length >= 32 &&
-    value.length <= 128;
+    /^[a-f0-9]{64}$/.test(value);
 }
 
-// تشفير رمز الطالب
 async function hashToken(token) {
   const data = new TextEncoder().encode(token);
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -139,30 +140,20 @@ async function hashToken(token) {
     .join("");
 }
 
-// مقارنة آمنة للقيم
 function safeEqual(a, b) {
-  if (
-    typeof a !== "string" ||
-    typeof b !== "string" ||
-    a.length !== b.length
-  ) {
-    return false;
-  }
+  if (typeof a !== "string" || typeof b !== "string" ||
+      a.length !== b.length) return false;
 
   let result = 0;
-
   for (let i = 0; i < a.length; i++) {
     result |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
-
   return result === 0;
 }
 
-// جلسة مستقلة لكل طالب
 export class StudentSession extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
-
     this.ctx = ctx;
     this.env = env;
     this.socket = null;
@@ -172,7 +163,49 @@ export class StudentSession extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
 
-    // تسجيل رمز الطالب المشفر
+    // إنشاء جلسة جهاز جديدة
+    if (url.pathname === "/register" && request.method === "POST") {
+      const body = await request.json();
+
+      if (!validToken(body.agent_token) ||
+          !validToken(body.pair_code)) {
+        return new Response("Invalid credentials", { status: 400 });
+      }
+
+      await this.ctx.storage.put("agentHash", await hashToken(body.agent_token));
+      await this.ctx.storage.put("pairHash", await hashToken(body.pair_code));
+      await this.ctx.storage.put("pairExpiry", Date.now() + 300000);
+
+      return Response.json({ registered: true });
+    }
+
+    // ربط المتصفح مرة واحدة
+    if (url.pathname === "/pair" && request.method === "POST") {
+      const body = await request.json();
+      const savedHash = await this.ctx.storage.get("pairHash");
+      const expiry = await this.ctx.storage.get("pairExpiry");
+
+      if (!savedHash || !expiry || Date.now() > expiry ||
+          !validToken(body.pair_code) ||
+          !safeEqual(await hashToken(body.pair_code), savedHash)) {
+        return new Response("Pairing code invalid or expired", { status: 401 });
+      }
+
+      const sessionToken = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+        .map(b => b.toString(16).padStart(2, "0")).join("");
+
+      await this.ctx.storage.put("sessionHash", await hashToken(sessionToken));
+      await this.ctx.storage.delete("pairHash");
+      await this.ctx.storage.delete("pairExpiry");
+
+      return Response.json({
+        paired: true,
+        student_id: body.student_id,
+        session_token: sessionToken
+      });
+    }
+
+    // تسجيل قديم
     if (url.pathname === "/enroll" && request.method === "POST") {
       const { token } = await request.json();
 
@@ -180,29 +213,22 @@ export class StudentSession extends DurableObject {
         return new Response("Invalid token", { status: 400 });
       }
 
-      await this.ctx.storage.put(
-        "tokenHash",
-        await hashToken(token)
-      );
-
+      await this.ctx.storage.put("tokenHash", await hashToken(token));
       return Response.json({ enrolled: true });
     }
 
-    // استقبال اتصال Agent والتحقق من الرمز
+    // اتصال Agent والتحقق من هويته
     if (url.pathname === "/agent") {
       const authorization = request.headers.get("Authorization") || "";
-
       const token = authorization.startsWith("Bearer ")
-        ? authorization.slice(7)
-        : "";
+        ? authorization.slice(7) : "";
 
-      const savedHash = await this.ctx.storage.get("tokenHash");
+      const agentHash = await this.ctx.storage.get("agentHash");
+      const oldHash = await this.ctx.storage.get("tokenHash");
+      const receivedHash = validToken(token) ? await hashToken(token) : "";
 
-      if (
-        !savedHash ||
-        !validToken(token) ||
-        !safeEqual(await hashToken(token), savedHash)
-      ) {
+      if ((!agentHash || !safeEqual(receivedHash, agentHash)) &&
+          (!oldHash || !safeEqual(receivedHash, oldHash))) {
         return new Response("Unauthorized", { status: 401 });
       }
 
@@ -216,60 +242,37 @@ export class StudentSession extends DurableObject {
       server.accept();
       this.socket = server;
 
-      server.addEventListener("message", event => {
-        this.handleMessage(event.data);
-      });
-
+      server.addEventListener("message", event => this.handleMessage(event.data));
       server.addEventListener("close", () => {
-        if (this.socket === server) {
-          this.socket = null;
-        }
+        if (this.socket === server) this.socket = null;
       });
-
       server.addEventListener("error", () => {
-        if (this.socket === server) {
-          this.socket = null;
-        }
+        if (this.socket === server) this.socket = null;
       });
 
-      return new Response(null, {
-        status: 101,
-        webSocket: client
-      });
+      return new Response(null, { status: 101, webSocket: client });
     }
 
-    // تنفيذ أوامر المختبر بعد التحقق من الطالب
+    // تنفيذ الأوامر بجلسة الطالب
     if (url.pathname === "/command" && request.method === "POST") {
       const body = await request.json();
+      const sessionHash = await this.ctx.storage.get("sessionHash");
+      const oldHash = await this.ctx.storage.get("tokenHash");
 
-      // التحقق من الرمز المخزن لهذا الطالب
-      const savedHash = await this.ctx.storage.get("tokenHash");
+      const receivedHash = validToken(body.session_token)
+        ? await hashToken(body.session_token) : "";
 
-      if (
-        !savedHash ||
-        !validToken(body.student_token) ||
-        !safeEqual(
-          await hashToken(body.student_token),
-          savedHash
-        )
-      ) {
+      if ((!sessionHash || !safeEqual(receivedHash, sessionHash)) &&
+          (!oldHash || !safeEqual(receivedHash, oldHash))) {
         return new Response("Unauthorized", { status: 401 });
       }
 
-      // التأكد من اتصال برنامج الطالب
       if (!this.socket || this.socket.readyState !== 1) {
-        return Response.json(
-          { error: "Student agent is offline" },
-          { status: 503 }
-        );
+        return Response.json({ error: "Student agent is offline" }, { status: 503 });
       }
 
-      // التحقق من نوع الأمر
       if (!LAB_CONFIG.enabled_actions.includes(body.action)) {
-        return Response.json(
-          { error: "Invalid action" },
-          { status: 400 }
-        );
+        return Response.json({ error: "Invalid action" }, { status: 400 });
       }
 
       const requestId = crypto.randomUUID();
@@ -277,10 +280,7 @@ export class StudentSession extends DurableObject {
       const result = new Promise(resolve => {
         const timer = setTimeout(() => {
           this.pending.delete(requestId);
-
-          resolve({
-            error: "Agent response timed out"
-          });
+          resolve({ error: "Agent response timed out" });
         }, LAB_CONFIG.command_timeout);
 
         this.pending.set(requestId, data => {
@@ -289,7 +289,6 @@ export class StudentSession extends DurableObject {
         });
       });
 
-      // إرسال الأمر إلى جهاز الطالب
       this.socket.send(JSON.stringify({
         type: "command",
         id: requestId,
@@ -303,17 +302,12 @@ export class StudentSession extends DurableObject {
     return new Response("Not Found", { status: 404 });
   }
 
-  // استقبال نتائج الأوامر من جهاز الطالب
   handleMessage(message) {
     try {
       const data = JSON.parse(message);
-
-      if (data.type !== "result" || !data.id) {
-        return;
-      }
+      if (data.type !== "result" || !data.id) return;
 
       const resolve = this.pending.get(data.id);
-
       if (resolve) {
         this.pending.delete(data.id);
         resolve(data);
