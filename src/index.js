@@ -369,6 +369,8 @@ export class StudentSession extends DurableObject {
       }
 
       const requestId = crypto.randomUUID();
+      console.log("DEBUG: Command received", body.action);
+     console.log("DEBUG: Agent socket state", this.socket.readyState);
 
       // انتظار نتيجة الأمر من جهاز الطالب
       let resolveResult;
